@@ -80,7 +80,6 @@ mzml_in
   .tap{ mzmlfiles; mzml_msgf ; mzml_isobaric }
   .count()
   .set{ amount_mzml }
-  .subscribe {println "amount_mzml: $it"}
 
 sets
   .map{ it -> it[1] }
@@ -154,7 +153,6 @@ isobaricxml
   .map { it -> it[1] }
   .collect()
   .set { sorted_isoxml }
-  .subscribe {println "sorted_isoxml : $it"}
 
 mzmlfiles
   .tap { groupset_mzmls }
@@ -162,7 +160,6 @@ mzmlfiles
   .map { it.sort( {a, b -> a[1] <=> b[1]}) }  //to sort by the first element of a tuple in descending order
   .map { it -> [it.collect() { it[0] }, it.collect() { it[2] }] }
   .set{ mzmlfiles_all }
-  .subscribe {println "mzmlfiles_all : $it"}
 
 process createSpectraLookup {
 
@@ -201,7 +198,8 @@ process msgfPlus {
   set val(setname), file("${sample}.mzid"), file('out.mzid.tsv') into mzidtsvs
   
   """
-  msgf_plus -Xmx4000M -d $msgf_db -s $x -o "${sample}.mzid" -thread 1 -mod $mods -tda 0 -t 10.0ppm -ti -1,2 -m 0 -inst 3 -e 1 -protocol ${msgfprotocol} -ntt 2 -minLength 7 -maxLength 40 -minCharge 2 -maxCharge 5 -n 1 -addFeatures 1
+  fs=`du -Lk $msgf_db|cut -f1`
+  msgf_plus -Xmx\$((\$fs*8/1024))M -d $msgf_db -s $x -o "${sample}.mzid" -thread 1 -mod $mods -tda 0 -t 10.0ppm -ti -1,2 -m 0 -inst 3 -e 1 -protocol ${msgfprotocol} -ntt 2 -minLength 7 -maxLength 40 -minCharge 2 -maxCharge 5 -n 1 -addFeatures 1
   msgf_plus -Xmx3500M edu.ucsd.msjava.ui.MzIDToTsv -i "${sample}.mzid" -o out.mzid.tsv
  
   """
@@ -460,8 +458,8 @@ process createFastaBedGFF {
   publishDir "${params.outdir}", mode: 'copy', overwrite: true, saveAs: { it == "${setname}_novel_peptides.gff3" ? "${setname}_novel_peptides.gff3" : null}
  
   input:
-  set val(setname), val(peptype), file(peptides) , val(psmtype), file(psms) from novelFaBdGfPep
- 
+  set val(setname), val(peptype), file(peptides) , val(psmtype), file(psms) from novelFaBdGfPep  
+
   output:
   set val(setname), file('novel_peptides.fa') into novelfasta
   set val(setname), file('novel_peptides.bed') into novelbed
@@ -470,7 +468,7 @@ process createFastaBedGFF {
   set val(setname), file('novpep_perco_quant.txt') into novelpep_percoquant
  
   """
-  map_novelpeptide2genome.py --input $psms --gtf $gtffile --fastadb $mgsf_db --tab_out novel_peptides.tab.txt --fasta_out novel_peptides.fa --gff3_out ${setname}_novel_peptides.gff3 --bed_out novel_peptides.bed
+  map_novelpeptide2genome.py --input $psms --gtf $gtffile --fastadb $msgf_db --tab_out novel_peptides.tab.txt --fasta_out novel_peptides.fa --gff3_out ${setname}_novel_peptides.gff3 --bed_out novel_peptides.bed
   sort -k 1b,1 <(tail -n+2 $peptides) |cut -f 1,14-500 > peptable_sorted
   sort -k 2b,2 <(tail -n+2 novel_peptides.tab.txt) > novpep_sorted
   paste <(cut -f 2 novpep_sorted) <(cut -f1,3-500 novpep_sorted) > novpep_pepcols
@@ -626,7 +624,7 @@ process phastcons {
   set val(setname), file ('phastcons.txt') into phastcons_out
 
   """
-  calculate_phastcons.py $novelgff hg38.100way.phastCons.bw phastcons.txt
+  calculate_phastcons.py $novelgff ../../../hg38.phastCons100way.bw phastcons.txt
   """
 }
 
@@ -727,11 +725,13 @@ ns_snp_out
 
 process combineResults{
 
+  publishDir "${params.outdir}", mode: 'copy', overwrite: true
+
   input:
   set val(setname), file(a), file(b), file(c), file(d), file(e), file(f), file(g), file(h) from combined_novel
   
   output:
-  set val(setname), file('combined') into combined_novelpep_output
+  set val('nov'), val(setname), file("${setname}_novel_peptides.txt") into novpeps_finished
   
   script:
   if (!params.bamfiles)
@@ -743,8 +743,8 @@ process combineResults{
   join joined3 $e -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined4
   join joined4 $f -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined5
   join joined5 $g -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined6
-  grep '^Peptide' joined6 > combined
-  grep -v '^Peptide' joined6 >> combined
+  grep '^Peptide' joined6 > ${setname}_novel_peptides.txt
+  grep -v '^Peptide' joined6 >> ${setname}_novel_peptides.txt
   """
 
   else
@@ -757,22 +757,8 @@ process combineResults{
   join joined4 $f -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined5
   join joined5 $g -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined6
   join joined6 $h -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined7
-  grep '^Peptide' joined7 > combined
-  grep -v '^Peptide' joined7 >> combined
-  """
-}
-
-
-process addLociNovelPeptides{
-  
-  input:
-  set val(setname), file(x) from combined_novelpep_output
-  
-  output:
-  set val('nov'), val(setname), file("${setname}_novel_peptides.txt") into novpeps_finished
-  
-  """
-  group_novpepToLoci.py  --input $x --output ${setname}_novel_peptides.txt --distance 10kb
+  grep '^Peptide' joined7 > ${setname}_novel_peptides.txt
+  grep -v '^Peptide' joined7 >> ${setname}_novel_peptides.txt
   """
 }
 
@@ -835,13 +821,16 @@ process mapVariantPeptidesToGenome {
   
   output:
   set val('var'), val(setname), file("${setname}_variant_peptides.txt") into varpeps_finished
-  file "${setname}_variant_peptides.saav.pep.hg19cor.vcf" into saavvcfs_finished
+  file "${setname}_variant_peptides.saav.pep.vcf" into saavvcfs_finished
 
   """
   ${params.saavheader ? "cat <(head -n1 ${peptides}) <(grep ${params.saavheader} ${peptides}) > saavpeps" : "mv ${peptides} saavpeps" }
   parse_spectrumAI_out.py --spectrumAI_out $x --input saavpeps --output setsaavs
   ${params.saavheader ? "cat setsaavs <(grep -v ${params.saavheader} ${peptides} | sed \$'s/\$/\tNA/') > ${setname}_variant_peptides.txt" : "mv setsaavs ${setname}_variant_peptides.txt"}
-  map_cosmic_snp_tohg19.py --input ${setname}_variant_peptides.txt --output ${setname}_variant_peptides.saav.pep.hg19cor.vcf --cosmic_input $cosmic --dbsnp_input $dbsnp
+  map_cosmic_snp_tohg19.py --input ${setname}_variant_peptides.txt --output ${setname}_variant_peptides.saav.pep.vcf --cosmic_input $cosmic --dbsnp_input $dbsnp
+  # Remove PSM-table specific stuff (RT, precursor, etc etc) from variant PEPTIDE table
+  cut -f 1,2,14-5000 ${setname}_variant_peptides.txt > pepsfix
+  mv pepsfix ${setname}_variant_peptides.txt
   """
 }
 
@@ -849,6 +838,9 @@ novpeps_finished
   .concat(varpeps_finished) 
   .groupTuple()
   .set { setmerge_peps }
+
+accession_keymap = ['var': 'Peptide sequence', 'nov': 'Mod.peptide']
+acc_removemap = ['nov': 'Peptide', 'var': 'Mod.peptide']
 
 process mergeSetPeptidetable {
   
@@ -861,8 +853,39 @@ process mergeSetPeptidetable {
   file "${peptype}_peptidetable.txt" into produced_peptables
 
   """
-  paste <(head -n1 peps1) <(echo Setname) > ${peptype}_peptidetable.txt
-  count=1;for setn in ${setnames.join(' ')}; do paste <(tail -n+2 peps\$count) <(yes \$setn|head -n \$(tail -n+2 peps\$count|wc -l)) >> ${peptype}_peptidetable.txt;((count++));done
+  # build non-changing fields (seq based fields) table:
+  fixfields=`head -n1 peps1 |tr -s '\\t' '\\n' | egrep -vn '(Setname|Spectrum|q-val|plex|${acc_removemap[peptype]})' | cut -f 1 -d ':'`
+  fixfields=`echo \$fixfields | sed 's/ /,/g'`
+  head -n1 peps1 | cut -f `echo \$fixfields` > fixheader
+  count=1; for setn in ${setnames.sort().join(' ')} ; do
+    cut -f `echo \$fixfields` peps\$count | tail -n+2 >> fixpeps
+    ((count++))
+  done
+  if [ ${peptype} == 'nov' ]
+  then 
+     cat fixheader <(sort -u -k1b,1 fixpeps) > temp
+     group_novpepToLoci.py  --input temp --output temp.loci --distance 10kb
+     head -n1 temp.loci > fixheader
+     tail -n+2 temp.loci > fixpeps
+  fi
+  sort -u -k1b,1 fixpeps > temp
+  mv temp fixpeps
+
+  ## Build changing fields table
+  touch peptable
+  count=1; for setn in ${setnames.sort().join(' ')}; do
+    varfields=`head -n1 peps\$count |tr -s '\\t' '\\n' | egrep -n '(${accession_keymap[peptype]}|Spectrum|q-val|plex)' | cut -f 1 -d ':'`
+    varfields=`echo \$varfields| sed 's/ /,/g'`
+    # first add to header, cut from f2 to remove join-key pep seq field
+    head -n1 peps\$count | cut -f `echo \$varfields` | cut -f 2-5000| sed "s/^\\(\\w\\)/\${setn}_\\1/;s/\\(\\s\\)/\\1\${setn}_/g" > varhead
+    paste fixheader varhead > newheader && mv newheader fixheader
+    # then join the values
+    tail -n+2 peps\$count | cut -f `echo \$varfields` | sort -k1b,1 > sortpep; join peptable sortpep -a1 -a2 -o auto -e 'NA' -t \$'\\t' > joined
+    mv joined peptable
+    ((count++))
+  done
+  join fixpeps peptable -a1 -a2 -o auto -e 'NA' -t \$'\\t' > fixvarpeps
+  cat fixheader fixvarpeps > ${peptype}_peptidetable.txt 
   """
 }
 produced_psmtables
